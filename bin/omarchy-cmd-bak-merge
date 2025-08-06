@@ -40,7 +40,7 @@ while true; do
   if command -v meld &>/dev/null; then
     meld "$ORIG_FILE" "$BACKUP_FILE"
   else
-    vimdiff "$ORIG_FILE" "$BACKUP_FILE"
+    nvim -d "$ORIG_FILE" "$BACKUP_FILE"
   fi
 
   echo
