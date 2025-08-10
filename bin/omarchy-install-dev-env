@@ -1,6 +1,7 @@
 #!/bin/bash
 
-ensure_composer_bin_in_path() {
+install_php_and_ensure_composer_bin_in_path() {
+  yay -S php composer --noconfirm
   if [[ ":$PATH:" != *":$HOME/.config/composer/vendor/bin:"* ]]; then
     echo 'export PATH="$HOME/.config/composer/vendor/bin:$PATH"' >> "$HOME/.bashrc"
     source "$HOME/.bashrc"
@@ -36,16 +37,15 @@ go)
   ;;
 laravel)
   echo -e "Installing PHP and Laravel...\n"
-  yay -S php composer --noconfirm
+  install_php_and_ensure_composer_bin_in_path
   composer global require laravel/installer
-  ensure_composer_bin_in_path
   echo "PHP, Composer, and Laravel have been installed successfully."
   echo "You can now run: laravel new myproject"
   ;;
 symfony)
   echo -e "Installing PHP and Symfony...\n"
-  yay -S php composer symfony-cli --noconfirm
-  ensure_composer_bin_in_path
+  install_php_and_ensure_composer_bin_in_path
+  yay -S symfony-cli --noconfirm
   echo "PHP, Composer, and Symfony CLI have been installed successfully."
   echo "You can now run: symfony new myproject"
   ;;
