@@ -22,10 +22,10 @@ install_php() {
   local extensions_to_enable=(
     "bcmath"
     "intl"
+    "iconv"
     "openssl"
     "pdo_sqlite"
     "pdo_mysql"
-    "pdo_pgsql"
   )
 
   for ext in "${extensions_to_enable[@]}"; do
