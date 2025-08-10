@@ -45,7 +45,7 @@ laravel)
 symfony)
   echo -e "Installing PHP and Symfony...\n"
   yay -S php composer --noconfirm
-  composer global require symfony/cli
+  curl -sS https://get.symfony.com/cli/installer | bash
   ensure_composer_bin_in_path
   echo "PHP, Composer, and Symfony CLI have been installed successfully."
   echo "You can now run: symfony new myproject"
