@@ -6,8 +6,9 @@ if [[ -z "$1" ]]; then
 fi
 
 install_php() {
-  yay -Sy php composer --noconfirm
+  yay -Sy php composer php-sqlite --noconfirm
 
+  # Install Path for Composer
   if [[ ":$PATH:" != *":$HOME/.config/composer/vendor/bin:"* ]]; then
     echo 'export PATH="$HOME/.config/composer/vendor/bin:$PATH"' >>"$HOME/.bashrc"
     source "$HOME/.bashrc"
@@ -15,6 +16,21 @@ install_php() {
   else
     echo "Composer global bin directory already in PATH."
   fi
+
+  # Enable some extensions
+  local php_ini_path="/etc/php/php.ini"
+  local extensions_to_enable=(
+    "bcmath"
+    "intl"
+    "openssl"
+    "pdo_sqlite"
+    "pdo_mysql"
+    "pdo_pgsql"
+  )
+
+  for ext in "${extensions_to_enable[@]}"; do
+    sudo sed -i "s/^;extension=${ext}/extension=${ext}/" "$php_ini_path"
+  done
 }
 
 case "$1" in
