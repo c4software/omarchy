@@ -104,7 +104,7 @@ show_screenshot_menu() {
   *Window*) $OMARCHY_BIN_PATH/omarchy-cmd-screenshot window ;;
   *Display*) $OMARCHY_BIN_PATH/omarchy-cmd-screenshot output ;;
   *) show_capture_menu ;;
-  esac
+  # esa
 }
 
 show_screenrecord_menu() {
