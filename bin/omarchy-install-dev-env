@@ -47,7 +47,10 @@ symfony)
   install_php_and_ensure_composer_bin_in_path
   yay -S symfony-cli --noconfirm
   echo "PHP, Composer, and Symfony CLI have been installed successfully."
-  echo "You can now run: symfony new myproject"
+  echo "If you are building a traditional web application:"
+  echo "symfony new --webapp my_project"
+  echo "If you are building a microservice, console application or API:"
+  echo "symfony new my_project"
   ;;
 python)
   echo -e "Installing Python...\n"
