@@ -1,7 +1,13 @@
 #!/bin/bash
 
-install_php_and_ensure_composer_bin_in_path() {
-  yay -S php composer --noconfirm
+if [[ -z "$1" ]]; then
+  echo "Usage: omarchy-instal-dev-env <ruby|node|bun|go|laravel|symfony|python|elixir|rust|java|ocaml|dotnet>" >&2
+  exit 1
+fi
+
+install_php() {
+  yay -Sy php composer --noconfirm
+
   if [[ ":$PATH:" != *":$HOME/.config/composer/vendor/bin:"* ]]; then
     echo 'export PATH="$HOME/.config/composer/vendor/bin:$PATH"' >> "$HOME/.bashrc"
     source "$HOME/.bashrc"
@@ -10,11 +16,6 @@ install_php_and_ensure_composer_bin_in_path() {
     echo "Composer global bin directory already in PATH."
   fi
 }
-
-if [[ -z "$1" ]]; then
-  echo "Usage: omarchy-instal-dev-env <ruby|node|bun|go|laravel|symfony|python|elixir|rust|java|ocaml|dotnet>" >&2
-  exit 1
-fi
 
 case "$1" in
 ruby)
@@ -31,20 +32,24 @@ bun)
   echo -e "Installing Bun...\n"
   mise use -g bun@latest
   ;;
+deno)
+  echo -e "Installing Deno...\n"
+  mise use -g deno@latest
+  ;;
 go)
   echo -e "Installing Go...\n"
   mise use --global go@latest
   ;;
 laravel)
   echo -e "Installing PHP and Laravel...\n"
-  install_php_and_ensure_composer_bin_in_path
+  install_php
   composer global require laravel/installer
   echo "PHP, Composer, and Laravel have been installed successfully."
   echo "You can now run: laravel new myproject"
   ;;
 symfony)
   echo -e "Installing PHP and Symfony...\n"
-  install_php_and_ensure_composer_bin_in_path
+  install_php
   yay -S symfony-cli --noconfirm
   echo "PHP, Composer, and Symfony CLI have been installed successfully."
   echo "If you are building a traditional web application:"
@@ -71,6 +76,10 @@ rust)
 java)
   echo -e "Installing Java...\n"
   mise use --global java@latest
+  ;;
+zig)
+  echo -e "Installing Zig...\n"
+  mise use --global zig@latest
   ;;
 ocaml)
   echo -e "Installing OCaml...\n"
