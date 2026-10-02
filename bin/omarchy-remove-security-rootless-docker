@@ -4,7 +4,11 @@
 
 set -e
 
-if ! systemctl --user -q is-enabled docker.service 2>/dev/null; then
+# Clean up whatever is left, not only an enabled unit: a unit disabled without
+# --now keeps the daemon running, and the context may still be selected.
+if ! systemctl --user -q is-enabled docker.service 2>/dev/null \
+  && ! systemctl --user -q is-active docker.service docker.socket 2>/dev/null \
+  && ! docker context inspect rootless &>/dev/null; then
   echo "Rootless Docker is not enabled for $USER."
   exit 0
 fi

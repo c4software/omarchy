@@ -3,8 +3,9 @@
 # Rootless Docker runs a per-user daemon next to the system one. Setup installs
 # the rootless pieces, keeps the daemon alive with linger, enables the packaged
 # user unit, and selects it through a docker context (not DOCKER_HOST, so
-# `sudo docker` keeps reaching the system daemon). Remove undoes the unit and
-# the context and leaves the system daemon alone.
+# `sudo docker` keeps reaching the system daemon). A failure after enabling the
+# unit disables it again, so a rerun and the menu don't take it for finished.
+# Remove cleans up whatever is left and leaves the system daemon alone.
 
 set -euo pipefail
 
@@ -16,6 +17,8 @@ home="$test_dir/home"
 runtime="$test_dir/run"
 stub_bin="$test_dir/bin"
 calls="$test_dir/calls"
+subuid="$test_dir/subuid"
+subgid="$test_dir/subgid"
 mkdir -p "$home" "$runtime" "$stub_bin"
 
 stub() { # name body
@@ -24,78 +27,117 @@ stub() { # name body
 }
 
 stub sudo 'exec "$@"'
+stub sleep ':'
 stub gum 'exit "${GUM_ANSWER:-0}"'
-stub grep 'exec /usr/bin/grep "$@" "${SUBID_FILE:?}"' # setup checks /etc/subuid and /etc/subgid
+# Point the account files at fixtures instead of reading the host's.
+stub grep '
+args=()
+for arg in "$@"; do
+  case $arg in
+  /etc/subuid) args+=("$SUBUID_FILE") ;;
+  /etc/subgid) args+=("$SUBGID_FILE") ;;
+  *) args+=("$arg") ;;
+  esac
+done
+exec /usr/bin/grep "${args[@]}"'
 stub omarchy-pkg-add 'echo "pkg-add $*" >>"$CALLS"'
 stub omarchy-pkg-aur-add 'echo "aur-add $*" >>"$CALLS"'
 stub loginctl 'echo "loginctl $*" >>"$CALLS"'
 stub systemctl '
 echo "systemctl $*" >>"$CALLS"
-if [[ $* == *is-enabled* ]]; then exit "${UNIT_ENABLED:-1}"; fi
-if [[ $* == *"enable --now docker.service"* ]]; then python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$XDG_RUNTIME_DIR/docker.sock"; fi
+case $* in
+*is-enabled*) exit "${UNIT_ENABLED:-1}" ;;
+*is-active*) exit "${UNIT_ACTIVE:-1}" ;;
+*"enable --now docker.service"*)
+  [[ ${DAEMON_STARTS:-1} == 1 ]] && python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$XDG_RUNTIME_DIR/docker.sock"
+  ;;
+esac
 exit 0'
 stub docker '
 echo "docker $*" >>"$CALLS"
-if [[ "$1 $2" == "context inspect" ]]; then exit "${CONTEXT_EXISTS:-1}"; fi
+if [[ "$1 $2" == "context inspect" ]]; then
+  [[ ${CONTEXT_HOST:-} ]] || exit 1
+  [[ $* == *--format* ]] && echo "$CONTEXT_HOST"
+fi
 exit 0'
 
-subid="$test_dir/subid"
-
-run() { # command UNIT_ENABLED GUM_ANSWER CONTEXT_EXISTS SUBID_LINE
+# Variables: UNIT_ENABLED UNIT_ACTIVE GUM_ANSWER CONTEXT_HOST DAEMON_STARTS SUBUID SUBGID
+run() { # command
   rm -f "$calls" "$runtime/docker.sock"
-  printf '%s\n' "$5" >"$subid"
+  printf '%s\n' "${SUBUID-tester:100000:65536}" >"$subuid"
+  printf '%s\n' "${SUBGID-tester:100000:65536}" >"$subgid"
   env HOME="$home" USER="tester" XDG_RUNTIME_DIR="$runtime" CALLS="$calls" \
-    UNIT_ENABLED="$2" GUM_ANSWER="$3" CONTEXT_EXISTS="$4" SUBID_FILE="$subid" \
+    SUBUID_FILE="$subuid" SUBGID_FILE="$subgid" \
+    UNIT_ENABLED="${UNIT_ENABLED:-1}" UNIT_ACTIVE="${UNIT_ACTIVE:-1}" GUM_ANSWER="${GUM_ANSWER:-0}" \
+    CONTEXT_HOST="${CONTEXT_HOST:-}" DAEMON_STARTS="${DAEMON_STARTS:-1}" \
     PATH="$stub_bin:$ROOT/bin:$PATH" \
-    bash "$ROOT/bin/$1" >/dev/null 2>&1
+    bash "$ROOT/bin/$1" >/dev/null 2>&1 || true
 }
 
 called() { grep -Fqx -- "$1" "$calls" 2>/dev/null; }
+mentions() { grep -qE -- "$1" "$calls" 2>/dev/null; }
+
+own_host="host=unix://$runtime/docker.sock"
 
 # Setup, confirmed -> packages, linger, unit, context created and selected.
-run omarchy-setup-security-rootless-docker 1 0 1 "tester:100000:65536"
+run omarchy-setup-security-rootless-docker
 called "pkg-add rootlesskit slirp4netns" || fail "setup installs rootlesskit and slirp4netns"
 called "aur-add docker-rootless-extras" || fail "setup installs docker-rootless-extras from the AUR"
 called "loginctl enable-linger tester" || fail "setup enables linger"
 called "systemctl --user enable --now docker.service" || fail "setup enables the packaged user unit"
-called "docker context create rootless --description Rootless Docker (tester) --docker host=unix://$runtime/docker.sock" || fail "setup creates the rootless context on the user socket"
+called "docker context create rootless --description Rootless Docker (tester) --docker $own_host" || fail "setup creates the rootless context on the user socket"
 called "docker context use rootless" || fail "setup selects the rootless context"
+! grep -E "^systemctl " "$calls" | grep -qv -- "--user" || fail "setup must not touch the system docker units"
 pass "setup installs, enables the user daemon, and selects it through a context"
 
-# Setup, context already there -> reused, not recreated.
-run omarchy-setup-security-rootless-docker 1 0 0 "tester:100000:65536"
-! grep -q "context create" "$calls" || fail "setup reuses an existing rootless context"
-called "docker context use rootless" || fail "setup still selects the existing context"
-pass "setup reuses an existing rootless context"
+# Setup, context already on this socket -> reused, not recreated.
+CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-setup-security-rootless-docker
+! mentions "context create" || fail "setup reuses a rootless context already on this socket"
+called "docker context use rootless" || fail "setup selects the existing context"
+pass "setup reuses a rootless context already on this socket"
+
+# Setup, context named rootless aimed elsewhere -> refused before installing.
+CONTEXT_HOST="ssh://someone@elsewhere" run omarchy-setup-security-rootless-docker
+! mentions "pkg-add|aur-add|enable --now|context (create|use)" || fail "setup refuses a rootless context aimed at another daemon"
+pass "setup refuses a rootless context that points to another daemon"
+
+# Setup, daemon never comes up -> unit disabled again, no context selected.
+DAEMON_STARTS=0 run omarchy-setup-security-rootless-docker
+called "systemctl --user disable --now docker.service" || fail "setup disables the unit when the daemon does not start"
+! mentions "context (create|use)" || fail "setup selects no context when the daemon does not start"
+pass "setup rolls the unit back when the daemon does not start"
 
 # Setup, declined -> nothing installed or enabled.
-run omarchy-setup-security-rootless-docker 1 1 1 "tester:100000:65536"
-! grep -qE "pkg-add|aur-add|loginctl|enable --now|context" "$calls" || fail "declined setup changes nothing"
+GUM_ANSWER=1 run omarchy-setup-security-rootless-docker
+! mentions "pkg-add|aur-add|loginctl|enable --now|context" || fail "declined setup changes nothing"
 pass "declined setup changes nothing"
 
-# Setup, no subordinate range -> stops before installing anything.
-run omarchy-setup-security-rootless-docker 1 0 1 "someone-else:100000:65536" || true
-! grep -qE "pkg-add|aur-add|enable --now" "$calls" || fail "setup refuses without a subuid/subgid range"
-pass "setup refuses without a subordinate UID/GID range"
+# Setup, a missing subordinate UID or GID range -> stops before installing.
+SUBUID="someone-else:100000:65536" run omarchy-setup-security-rootless-docker
+! mentions "pkg-add|aur-add|enable --now" || fail "setup refuses without a subuid range"
+SUBGID="" run omarchy-setup-security-rootless-docker
+! mentions "pkg-add|aur-add|enable --now" || fail "setup refuses without a subgid range"
+pass "setup refuses without a subordinate UID or GID range"
 
 # Setup, already enabled -> no-op.
-run omarchy-setup-security-rootless-docker 0 0 1 "tester:100000:65536"
-! grep -qE "pkg-add|enable --now|context" "$calls" || fail "setup is a no-op when already enabled"
+UNIT_ENABLED=0 run omarchy-setup-security-rootless-docker
+! mentions "pkg-add|enable --now|context" || fail "setup is a no-op when already enabled"
 pass "setup is a no-op when rootless Docker is already enabled"
 
-# Setup never touches the system daemon.
-run omarchy-setup-security-rootless-docker 1 0 1 "tester:100000:65536"
-! grep -E "^systemctl " "$calls" | grep -v -- "--user" | grep -q . || fail "setup must not touch the system docker units"
-pass "setup leaves the system daemon alone"
-
 # Remove -> unit disabled, default context back, rootless context removed.
-run omarchy-remove-security-rootless-docker 0 0 0 ""
+UNIT_ENABLED=0 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-security-rootless-docker
 called "systemctl --user disable --now docker.service docker.socket" || fail "remove disables the user unit"
 called "docker context use default" || fail "remove switches back to the default context"
 called "docker context rm -f rootless" || fail "remove deletes the rootless context"
 pass "remove disables the user daemon and restores the default context"
 
-# Remove, not enabled -> no-op.
-run omarchy-remove-security-rootless-docker 1 0 0 ""
-! grep -qE "disable|context use" "$calls" || fail "remove is a no-op when rootless Docker is off"
+# Remove, unit disabled but still running -> still stopped and cleaned up.
+UNIT_ACTIVE=0 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-security-rootless-docker
+called "systemctl --user disable --now docker.service docker.socket" || fail "remove stops a disabled but running daemon"
+called "docker context use default" || fail "remove restores the default context of a disabled but running daemon"
+pass "remove cleans up a daemon that is disabled but still running"
+
+# Remove, nothing left -> no-op.
+run omarchy-remove-security-rootless-docker
+! mentions "disable|context use" || fail "remove is a no-op when rootless Docker is off"
 pass "remove is a no-op when rootless Docker is off"
