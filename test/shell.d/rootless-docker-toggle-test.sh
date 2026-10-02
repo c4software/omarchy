@@ -5,7 +5,8 @@
 # user unit, and selects it through a docker context (not DOCKER_HOST, so
 # `sudo docker` keeps reaching the system daemon). A failure after enabling the
 # unit disables it again, so a rerun and the menu don't take it for finished.
-# Remove cleans up whatever is left and leaves the system daemon alone.
+# Remove cleans up whatever is left and leaves the system daemon alone, as well
+# as a `rootless` context that points to another daemon.
 
 set -euo pipefail
 
@@ -136,6 +137,18 @@ UNIT_ACTIVE=0 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-secu
 called "systemctl --user disable --now docker.service docker.socket" || fail "remove stops a disabled but running daemon"
 called "docker context use default" || fail "remove restores the default context of a disabled but running daemon"
 pass "remove cleans up a daemon that is disabled but still running"
+
+# Remove, unit enabled but the rootless context points elsewhere -> unit
+# stopped, the user's context left alone.
+UNIT_ENABLED=0 CONTEXT_HOST="ssh://someone@elsewhere" run omarchy-remove-security-rootless-docker
+called "systemctl --user disable --now docker.service docker.socket" || fail "remove still disables the user unit next to a foreign rootless context"
+! mentions "context (use|rm)" || fail "remove leaves a rootless context aimed at another daemon alone"
+pass "remove keeps a rootless context that points to another daemon"
+
+# Remove, only a foreign rootless context left -> no-op.
+CONTEXT_HOST="ssh://someone@elsewhere" run omarchy-remove-security-rootless-docker
+! mentions "disable|context (use|rm)" || fail "remove is a no-op when only a foreign rootless context exists"
+pass "remove is a no-op when only a foreign rootless context exists"
 
 # Remove, nothing left -> no-op.
 run omarchy-remove-security-rootless-docker
