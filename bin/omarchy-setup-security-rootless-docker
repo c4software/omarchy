@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# omarchy:summary=Run a rootless Docker daemon for your user, next to the system daemon
+# omarchy:requires-sudo=true
+
+set -e
+
+# Rootless Docker runs a second dockerd as your user, inside a user namespace:
+# root in a container maps to your own account, so `docker` works without sudo
+# and without the root-equivalent docker group. The system daemon keeps running
+# untouched for what needs real root (the Windows VM, privileged containers),
+# reached with `sudo docker` as before. The two daemons have separate images,
+# volumes and networks.
+
+SOCKET="$XDG_RUNTIME_DIR/docker.sock"
+
+if systemctl --user -q is-enabled docker.service 2>/dev/null; then
+  echo "Rootless Docker is already enabled for $USER."
+  echo "To disable it again, run: omarchy-remove-security-rootless-docker"
+  exit 0
+fi
+
+echo ""
+echo "Rootless Docker runs a Docker daemon as your own user, next to the system one:"
+echo ""
+echo "    docker ...        your rootless daemon, no sudo, no docker group"
+echo "    sudo docker ...   the system daemon, unchanged (Windows VM, privileged containers)"
+echo ""
+echo "Containers can only reach what your user can. Limits: ports below 1024 need"
+echo "a sysctl, files written in bind mounts by a non-root container user land on"
+echo "a subordinate UID (100000+), and images are not shared with the system daemon."
+echo ""
+
+if ! gum confirm "Enable rootless Docker?"; then
+  echo "Aborted. No changes made."
+  exit 0
+fi
+
+if ! grep -q "^$USER:" /etc/subuid || ! grep -q "^$USER:" /etc/subgid; then
+  echo "No subordinate UID/GID range for $USER in /etc/subuid and /etc/subgid." >&2
+  exit 1
+fi
+
+omarchy-pkg-add rootlesskit slirp4netns
+# Arch's docker package leaves out upstream's rootless script and user unit.
+omarchy-pkg-aur-add docker-rootless-extras
+
+# Keeps the daemon (and --restart containers) running without an open session.
+sudo loginctl enable-linger "$USER"
+
+systemctl --user daemon-reload
+systemctl --user enable --now docker.service
+
+for _ in {1..30}; do
+  [[ -S $SOCKET ]] && break
+  sleep 0.5
+done
+if [[ ! -S $SOCKET ]]; then
+  echo "The rootless daemon did not start. See: journalctl --user -u docker" >&2
+  exit 1
+fi
+
+# A context rather than DOCKER_HOST: plain `docker` picks it up, while sudo
+# runs with root's own config and keeps reaching the system daemon.
+if ! docker context inspect rootless &>/dev/null; then
+  docker context create rootless --description "Rootless Docker ($USER)" --docker "host=unix://$SOCKET" >/dev/null
+fi
+docker context use rootless >/dev/null
+
+echo ""
+echo "Rootless Docker ENABLED. 'docker' now talks to your rootless daemon,"
+echo "'sudo docker' still reaches the system one."
+echo "To go back to the system daemon by default: docker context use default"
+echo ""
