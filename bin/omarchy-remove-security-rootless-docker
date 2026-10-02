@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# omarchy:summary=Disable the rootless Docker daemon of your user
+
+set -e
+
+if ! systemctl --user -q is-enabled docker.service 2>/dev/null; then
+  echo "Rootless Docker is not enabled for $USER."
+  exit 0
+fi
+
+systemctl --user disable --now docker.service docker.socket 2>/dev/null || true
+
+if docker context inspect rootless &>/dev/null; then
+  docker context use default >/dev/null
+  docker context rm -f rootless >/dev/null
+fi
+
+echo ""
+echo "Rootless Docker DISABLED. 'docker' talks to the system daemon again"
+echo "(through sudo, unless sudoless Docker is enabled)."
+echo ""
+echo "Images and volumes stay in ~/.local/share/docker. They belong to subordinate"
+echo "UIDs, so delete them with: rootlesskit rm -rf ~/.local/share/docker"
+echo ""
