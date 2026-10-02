@@ -41,6 +41,18 @@ if ! grep -q "^$USER:" /etc/subuid || ! grep -q "^$USER:" /etc/subgid; then
   exit 1
 fi
 
+# Reuse a context named rootless only when it already points at this socket:
+# selecting one aimed elsewhere (another socket, an SSH host) would leave plain
+# `docker` on the wrong daemon. Checked before anything is installed.
+if docker context inspect rootless &>/dev/null; then
+  context_host=$(docker context inspect rootless --format '{{.Endpoints.docker.Host}}')
+  if [[ $context_host != "unix://$SOCKET" ]]; then
+    echo "A docker context named 'rootless' already points to $context_host." >&2
+    echo "Remove or rename it (docker context rm rootless), then run this again." >&2
+    exit 1
+  fi
+fi
+
 omarchy-pkg-add rootlesskit slirp4netns
 # Arch's docker package leaves out upstream's rootless script and user unit.
 omarchy-pkg-aur-add docker-rootless-extras
@@ -48,24 +60,30 @@ omarchy-pkg-aur-add docker-rootless-extras
 # Keeps the daemon (and --restart containers) running without an open session.
 sudo loginctl enable-linger "$USER"
 
+# The menu and a rerun read an enabled unit as a finished setup, so a failure
+# from here on disables it again rather than leaving a half-done state behind.
+rollback() {
+  echo "$1" >&2
+  systemctl --user disable --now docker.service 2>/dev/null || true
+  exit 1
+}
+
 systemctl --user daemon-reload
-systemctl --user enable --now docker.service
+systemctl --user enable --now docker.service || rollback "The rootless daemon did not start. See: journalctl --user -u docker"
 
 for _ in {1..30}; do
   [[ -S $SOCKET ]] && break
   sleep 0.5
 done
-if [[ ! -S $SOCKET ]]; then
-  echo "The rootless daemon did not start. See: journalctl --user -u docker" >&2
-  exit 1
-fi
+[[ -S $SOCKET ]] || rollback "The rootless daemon did not start. See: journalctl --user -u docker"
 
 # A context rather than DOCKER_HOST: plain `docker` picks it up, while sudo
 # runs with root's own config and keeps reaching the system daemon.
 if ! docker context inspect rootless &>/dev/null; then
-  docker context create rootless --description "Rootless Docker ($USER)" --docker "host=unix://$SOCKET" >/dev/null
+  docker context create rootless --description "Rootless Docker ($USER)" --docker "host=unix://$SOCKET" >/dev/null \
+    || rollback "Could not create the rootless docker context."
 fi
-docker context use rootless >/dev/null
+docker context use rootless >/dev/null || rollback "Could not select the rootless docker context."
 
 echo ""
 echo "Rootless Docker ENABLED. 'docker' now talks to your rootless daemon,"
