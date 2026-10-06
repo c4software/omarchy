@@ -5,6 +5,7 @@
 set -e
 
 SOCKET="$XDG_RUNTIME_DIR/docker.sock"
+LINGER_MARKER="$HOME/.local/state/omarchy/rootless-docker-linger"
 
 # Only a context on this user's socket is ours to reset: one named rootless but
 # aimed elsewhere (another socket, an SSH host) belongs to the user, just as
@@ -20,10 +21,11 @@ if docker context inspect rootless &>/dev/null; then
 fi
 
 # Clean up whatever is left, not only an enabled unit: a unit disabled without
-# --now keeps the daemon running, and the context may still be selected.
+# --now keeps the daemon running, and the context may still be selected or the
+# linger setup turned on still be in place.
 if ! systemctl --user -q is-enabled docker.service 2>/dev/null \
   && ! systemctl --user -q is-active docker.service docker.socket 2>/dev/null \
-  && [[ $own_context == false ]]; then
+  && [[ $own_context == false && ! -f $LINGER_MARKER ]]; then
   echo "Rootless Docker is not enabled for $USER."
   exit 0
 fi
@@ -33,6 +35,12 @@ systemctl --user disable --now docker.service docker.socket 2>/dev/null || true
 if [[ $own_context == true ]]; then
   docker context use default >/dev/null
   docker context rm -f rootless >/dev/null
+fi
+
+# Only a linger setup turned on: one the user already had stays.
+if [[ -f $LINGER_MARKER ]]; then
+  loginctl disable-linger "$USER"
+  rm -f "$LINGER_MARKER"
 fi
 
 echo ""

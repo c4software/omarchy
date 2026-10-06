@@ -6,7 +6,8 @@
 # `sudo docker` keeps reaching the system daemon). A failure after enabling the
 # unit disables it again, so a rerun and the menu don't take it for finished.
 # Remove cleans up whatever is left and leaves the system daemon alone, as well
-# as a `rootless` context that points to another daemon.
+# as a `rootless` context that points to another daemon. Linger is turned back
+# off on rollback and removal only when setup is what turned it on.
 
 set -euo pipefail
 
@@ -20,6 +21,7 @@ stub_bin="$test_dir/bin"
 calls="$test_dir/calls"
 subuid="$test_dir/subuid"
 subgid="$test_dir/subgid"
+linger_marker="$home/.local/state/omarchy/rootless-docker-linger"
 mkdir -p "$home" "$runtime" "$stub_bin"
 
 stub() { # name body
@@ -43,7 +45,10 @@ done
 exec /usr/bin/grep "${args[@]}"'
 stub omarchy-pkg-add 'echo "pkg-add $*" >>"$CALLS"'
 stub omarchy-pkg-aur-add 'echo "aur-add $*" >>"$CALLS"'
-stub loginctl 'echo "loginctl $*" >>"$CALLS"'
+stub loginctl '
+echo "loginctl $*" >>"$CALLS"
+[[ $1 == "show-user" ]] && echo "${LINGER:-no}"
+exit 0'
 stub systemctl '
 echo "systemctl $*" >>"$CALLS"
 case $* in
@@ -63,15 +68,20 @@ fi
 exit 0'
 
 # Variables: UNIT_ENABLED UNIT_ACTIVE GUM_ANSWER CONTEXT_HOST DAEMON_STARTS SUBUID SUBGID
+# LINGER (yes|no, the state before the run) LINGER_MARKED (1 = setup turned it on earlier)
 # Returns the command's exit status.
 run() { # command
-  rm -f "$calls" "$runtime/docker.sock"
+  rm -f "$calls" "$runtime/docker.sock" "$linger_marker"
+  if [[ ${LINGER_MARKED:-0} == 1 ]]; then
+    mkdir -p "${linger_marker%/*}"
+    touch "$linger_marker"
+  fi
   printf '%s\n' "${SUBUID-tester:100000:65536}" >"$subuid"
   printf '%s\n' "${SUBGID-tester:100000:65536}" >"$subgid"
   env HOME="$home" USER="tester" XDG_RUNTIME_DIR="$runtime" CALLS="$calls" \
     SUBUID_FILE="$subuid" SUBGID_FILE="$subgid" \
     UNIT_ENABLED="${UNIT_ENABLED:-1}" UNIT_ACTIVE="${UNIT_ACTIVE:-1}" GUM_ANSWER="${GUM_ANSWER:-0}" \
-    CONTEXT_HOST="${CONTEXT_HOST:-}" DAEMON_STARTS="${DAEMON_STARTS:-1}" \
+    CONTEXT_HOST="${CONTEXT_HOST:-}" DAEMON_STARTS="${DAEMON_STARTS:-1}" LINGER="${LINGER:-no}" \
     PATH="$stub_bin:$ROOT/bin:$PATH" \
     bash "$ROOT/bin/$1" >/dev/null 2>&1
 }
@@ -86,6 +96,7 @@ run omarchy-setup-security-rootless-docker || fail "setup succeeds"
 called "pkg-add rootlesskit slirp4netns" || fail "setup installs rootlesskit and slirp4netns"
 called "aur-add docker-rootless-extras" || fail "setup installs docker-rootless-extras from the AUR"
 called "loginctl enable-linger tester" || fail "setup enables linger"
+[[ -f $linger_marker ]] || fail "setup records that it turned linger on"
 called "systemctl --user enable --now docker.service" || fail "setup enables the packaged user unit"
 called "docker context create rootless --description Rootless Docker (tester) --docker $own_host" || fail "setup creates the rootless context on the user socket"
 called "docker context use rootless" || fail "setup selects the rootless context"
@@ -98,6 +109,12 @@ CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-setup-security-rootless-d
 called "docker context use rootless" || fail "setup selects the existing context"
 pass "setup reuses a rootless context already on this socket"
 
+# Setup, linger already on -> left as is and not recorded as ours.
+LINGER=yes run omarchy-setup-security-rootless-docker || fail "setup succeeds with linger already on"
+! mentions "enable-linger" || fail "setup does not enable a linger that is already on"
+[[ ! -f $linger_marker ]] || fail "setup does not claim a linger that was already on"
+pass "setup leaves a linger that was already on unrecorded"
+
 # Setup, context named rootless aimed elsewhere -> refused before installing.
 ! CONTEXT_HOST="ssh://someone@elsewhere" run omarchy-setup-security-rootless-docker || fail "setup fails on a rootless context aimed at another daemon"
 ! mentions "pkg-add|aur-add|enable --now|context (create|use)" || fail "setup refuses a rootless context aimed at another daemon"
@@ -107,7 +124,14 @@ pass "setup refuses a rootless context that points to another daemon"
 ! DAEMON_STARTS=0 run omarchy-setup-security-rootless-docker || fail "setup fails when the daemon does not start"
 called "systemctl --user disable --now docker.service" || fail "setup disables the unit when the daemon does not start"
 ! mentions "context (create|use)" || fail "setup selects no context when the daemon does not start"
-pass "setup rolls the unit back when the daemon does not start"
+called "loginctl disable-linger tester" || fail "setup turns linger back off when the daemon does not start"
+[[ ! -f $linger_marker ]] || fail "setup clears its linger record when the daemon does not start"
+pass "setup rolls the unit and linger back when the daemon does not start"
+
+# Setup, daemon never comes up, linger already on -> linger kept.
+! LINGER=yes DAEMON_STARTS=0 run omarchy-setup-security-rootless-docker || fail "setup fails when the daemon does not start with linger already on"
+! mentions "disable-linger" || fail "setup keeps a linger that was already on when rolling back"
+pass "setup keeps a linger that was already on when rolling back"
 
 # Setup, declined -> nothing installed or enabled.
 GUM_ANSWER=1 run omarchy-setup-security-rootless-docker || fail "declined setup exits cleanly"
@@ -131,7 +155,19 @@ UNIT_ENABLED=0 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-sec
 called "systemctl --user disable --now docker.service docker.socket" || fail "remove disables the user unit"
 called "docker context use default" || fail "remove switches back to the default context"
 called "docker context rm -f rootless" || fail "remove deletes the rootless context"
+! mentions "disable-linger" || fail "remove keeps a linger setup did not turn on"
 pass "remove disables the user daemon and restores the default context"
+
+# Remove, linger turned on by setup -> turned back off.
+UNIT_ENABLED=0 LINGER=yes LINGER_MARKED=1 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-security-rootless-docker || fail "remove succeeds with a linger setup turned on"
+called "loginctl disable-linger tester" || fail "remove turns off the linger setup turned on"
+[[ ! -f $linger_marker ]] || fail "remove clears the linger record"
+pass "remove turns off the linger setup turned on"
+
+# Remove, only the linger setup turned on is left -> still turned off.
+LINGER=yes LINGER_MARKED=1 run omarchy-remove-security-rootless-docker || fail "remove succeeds with only linger left"
+called "loginctl disable-linger tester" || fail "remove turns off a leftover linger"
+pass "remove turns off a linger left behind on its own"
 
 # Remove, unit disabled but still running -> still stopped and cleaned up.
 UNIT_ACTIVE=0 CONTEXT_HOST="unix://$runtime/docker.sock" run omarchy-remove-security-rootless-docker || fail "remove succeeds on a disabled but running daemon"
