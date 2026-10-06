@@ -13,6 +13,7 @@ set -e
 # volumes and networks.
 
 SOCKET="$XDG_RUNTIME_DIR/docker.sock"
+LINGER_MARKER="$HOME/.local/state/omarchy/rootless-docker-linger"
 
 if systemctl --user -q is-enabled docker.service 2>/dev/null; then
   echo "Rootless Docker is already enabled for $USER."
@@ -58,13 +59,23 @@ omarchy-pkg-add rootlesskit slirp4netns
 omarchy-pkg-aur-add docker-rootless-extras
 
 # Keeps the daemon (and --restart containers) running without an open session.
-sudo loginctl enable-linger "$USER"
+# Marked only when this turns linger on, so rollback and removal turn it back
+# off without taking away a linger the user already had.
+if [[ $(loginctl show-user "$USER" -p Linger --value) != "yes" ]]; then
+  loginctl enable-linger "$USER"
+  mkdir -p "${LINGER_MARKER%/*}"
+  touch "$LINGER_MARKER"
+fi
 
 # The menu and a rerun read an enabled unit as a finished setup, so a failure
 # from here on disables it again rather than leaving a half-done state behind.
 rollback() {
   echo "$1" >&2
   systemctl --user disable --now docker.service 2>/dev/null || true
+  if [[ -f $LINGER_MARKER ]]; then
+    loginctl disable-linger "$USER" || true
+    rm -f "$LINGER_MARKER"
+  fi
   exit 1
 }
 
